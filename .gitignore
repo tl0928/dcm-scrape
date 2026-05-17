@@ -1,0 +1,11 @@
+.DS_Store
+.env
+.env.*
+*.zip
+*.log
+output/
+raw/
+browser_profiles/
+__pycache__/
+*.pyc
+
