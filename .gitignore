@@ -8,4 +8,5 @@ raw/
 browser_profiles/
 __pycache__/
 *.pyc
+CLAUDE.md
 
