@@ -69,9 +69,10 @@ def validate(records: list[dict[str, Any]]) -> tuple[Counter, list[str]]:
         else:
             seen_urls.add(str(detail_url))
 
+        # Nameless records (rumored/future listings) are kept on purpose, so a
+        # missing name is reported as a stat but is not a blocking issue.
         if not name:
             stats["missing_name"] += 1
-            issues.append(f"record {index}: missing identity.name")
 
         for stat_key, path in core_paths.items():
             value = get_path(record, path)

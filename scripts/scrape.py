@@ -319,9 +319,10 @@ def scrape_dc(url: str, delay: float, bar: object = None) -> dict:
         raise ValueError(
             "no __NEXT_DATA__ (possible bot-check or empty page)"
         )
-    if not dc.get("name"):
-        status = dc.get("status") or dc.get("stage") or "no-name"
-        raise ValueError(f"PLANNED:{status}")
+
+    # Records without a name (rumored/future listings) are still written to the
+    # main output with name=null and whatever fields exist; subset later by
+    # `stage` or by null name. They are no longer split into a separate file.
 
     link = dc.get("link", "")
     statelink = dc.get("statelink", "")
@@ -339,8 +340,10 @@ def scrape_dc(url: str, delay: float, bar: object = None) -> dict:
     if isinstance(dc.get("companies"), dict):
         operator = dc["companies"].get("name")
 
-    page_props = data.get("props", {}).get("pageProps", {}) if data else {}
-    archived = page_props.get("query", {}).get("rw") == "true"
+    # Archived (closed/sold/converted) listings keep stage: 2 but are marked
+    # with status: 2; active listings use status: 1. (query.rw is "true" on
+    # every page and is NOT an archived signal.)
+    archived = dc.get("status") == 2
 
     return {
         "source": {"detail_url": detail_url},
@@ -495,8 +498,6 @@ def main() -> None:
     print(f"\nScope:  {' > '.join(scope_parts)}", file=sys.stderr)
     print(f"Output: {out_path}", file=sys.stderr)
 
-    planned_path = out_path.with_name(out_path.stem + "_planned.txt")
-
     # Load already-scraped URLs (resume support)
     seen: set[str] = set()
     if out_path.exists():
@@ -506,14 +507,8 @@ def main() -> None:
                     seen.add(json.loads(line)["source"]["detail_url"])
                 except Exception:
                     pass
-    if planned_path.exists():
-        with planned_path.open(encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    seen.add(line)
     if seen:
-        print(f"Resuming: {len(seen)} already scraped/skipped", file=sys.stderr)
+        print(f"Resuming: {len(seen)} already scraped", file=sys.stderr)
 
     urls_cache = out_path.with_name(out_path.stem + "_urls.txt")
 
@@ -549,12 +544,10 @@ def main() -> None:
     )
 
     count = 0
-    skipped_planned = 0
     consecutive_bot_checks = 0
     bar = None
     start_time = time.time()
-    with out_path.open("a", encoding="utf-8") as fh, \
-            planned_path.open("a", encoding="utf-8") as pfh:
+    with out_path.open("a", encoding="utf-8") as fh:
         try:
             from tqdm import tqdm  # type: ignore[import]
             bar = tqdm(
@@ -595,13 +588,7 @@ def main() -> None:
                     )
             except Exception as exc:
                 msg = str(exc)
-                if msg.startswith("PLANNED:"):
-                    _log(f"  SKIP (planned) {url}: {msg[8:]}", bar)
-                    pfh.write(url + "\n")
-                    pfh.flush()
-                    skipped_planned += 1
-                    consecutive_bot_checks = 0
-                elif "no __NEXT_DATA__" in msg:
+                if "no __NEXT_DATA__" in msg:
                     _log(f"  ERROR (bot-check) {url}", bar)
                     consecutive_bot_checks += 1
                     if consecutive_bot_checks >= 3:
@@ -620,9 +607,7 @@ def main() -> None:
                     consecutive_bot_checks = 0
 
     print(
-        f"\nDone: {count} new records written to {out_path}"
-        + (f", {skipped_planned} planned/future skipped to {planned_path}"
-           if skipped_planned else ""),
+        f"\nDone: {count} new records written to {out_path}",
         file=sys.stderr,
     )
 
