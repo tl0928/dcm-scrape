@@ -49,6 +49,7 @@ try:
     _cffi_session = _cffi_requests.Session(impersonate="chrome120")
     _USE_CURL = True
 except ImportError:
+    _cffi_requests = None
     _cffi_session = None
     _USE_CURL = False
 
@@ -108,12 +109,13 @@ def _get(
             _log(f"  [retry {attempt}] {last_exc} -> {url}", bar)
         try:
             if _USE_CURL:
+                assert _cffi_session is not None
                 referer = url.rstrip("/").rsplit("/", 1)[0] + "/"
                 resp = _cffi_session.get(
                     url, headers={"Referer": referer}, timeout=20
                 )
                 if resp.status_code in (429, 500, 502, 503, 504):
-                    last_exc = f"HTTP {resp.status_code}"
+                    last_exc = Exception(f"HTTP {resp.status_code}")
                     continue
                 resp.raise_for_status()
                 return resp.text
@@ -362,7 +364,7 @@ def _default_output(
 def _refresh_session() -> None:
     """Replace the curl_cffi session to clear cookies and connection state."""
     global _cffi_session
-    if _USE_CURL:
+    if _USE_CURL and _cffi_requests is not None:
         _cffi_session = _cffi_requests.Session(impersonate="chrome120")
 
 
