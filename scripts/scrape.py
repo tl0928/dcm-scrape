@@ -35,24 +35,36 @@ BASE_URL = "https://www.datacentermap.com"
 # Context and configuration
 # ---------------------------------------------------------------------------
 
+class _RetryableError(Exception):
+    """A transient failure (429/5xx or network error) that warrants a back-off retry."""
+
+
 class ScrapeContext:
-    """Holds session state, proxy pool, and configuration for scraping."""
+    """Owns the HTTP session, proxy pool, and configuration for scraping.
+
+    All network access goes through ``fetch``; callers never touch the
+    underlying curl_cffi session directly.
+    """
 
     def __init__(
         self,
         delay: float,
-        use_curl: bool,
         cffi_requests=None,
         proxies: list[str] | None = None,
     ):
         self.delay = delay
-        self.use_curl = use_curl
         self._cffi_requests = cffi_requests
         self._cffi_session = None
         self.proxies = proxies or []
 
-        if self.use_curl and self._cffi_requests is not None:
+        if self.use_curl:
+            assert self._cffi_requests is not None
             self._cffi_session = self._cffi_requests.Session(impersonate="chrome120")
+
+    @property
+    def use_curl(self) -> bool:
+        """True when curl_cffi is available (single source of truth)."""
+        return self._cffi_requests is not None
 
     def pick_proxy(self) -> dict | None:
         """Random proxy from the pool as a curl_cffi/requests-style mapping."""
@@ -63,8 +75,48 @@ class ScrapeContext:
 
     def refresh_session(self) -> None:
         """Replace the curl_cffi session to clear cookies and connection state."""
-        if self.use_curl and self._cffi_requests is not None:
+        if self.use_curl:
+            assert self._cffi_requests is not None
             self._cffi_session = self._cffi_requests.Session(impersonate="chrome120")
+
+    def fetch(self, url: str) -> str:
+        """Perform one HTTP GET and return the body text.
+
+        Raises ``_RetryableError`` for 429/5xx and network failures (the caller
+        retries those with back-off); other HTTP errors propagate as fatal.
+        """
+        proxies = self.pick_proxy()
+        if self.use_curl:
+            referer = url.rstrip("/").rsplit("/", 1)[0] + "/"
+            kwargs: dict = {"headers": {"Referer": referer}, "timeout": 20}
+            if proxies:
+                kwargs["proxies"] = proxies
+            assert self._cffi_session is not None
+            try:
+                resp = self._cffi_session.get(url, **kwargs)
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    raise _RetryableError(f"HTTP {resp.status_code}")
+                resp.raise_for_status()
+                return resp.text
+            except _RetryableError:
+                raise
+            except Exception as exc:  # curl_cffi network/TLS errors are transient
+                raise _RetryableError(str(exc)) from exc
+
+        rq = urllib.request.Request(url, headers=_HEADERS)
+        opener = urllib.request.urlopen
+        if proxies:
+            handler = urllib.request.ProxyHandler(proxies)
+            opener = urllib.request.build_opener(handler).open
+        try:
+            with opener(rq, timeout=20) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            if exc.code in (429, 500, 502, 503, 504):
+                raise _RetryableError(str(exc)) from exc
+            raise
+        except urllib.error.URLError as exc:
+            raise _RetryableError(str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -143,40 +195,11 @@ def _get(
         time.sleep(pause)
         if attempt > 0:
             _log(f"  [retry {attempt}] {last_exc} -> {url}", bar)
-        proxies = ctx.pick_proxy()
         try:
-            if ctx.use_curl:
-                assert ctx._cffi_session is not None
-                referer = url.rstrip("/").rsplit("/", 1)[0] + "/"
-                kwargs: dict = {"headers": {"Referer": referer}, "timeout": 20}
-                if proxies:
-                    kwargs["proxies"] = proxies
-                resp = ctx._cffi_session.get(url, **kwargs)
-                if resp.status_code in (429, 500, 502, 503, 504):
-                    last_exc = Exception(f"HTTP {resp.status_code}")
-                    continue
-                resp.raise_for_status()
-                return resp.text
-            rq = urllib.request.Request(url, headers=_HEADERS)
-            opener = urllib.request.urlopen
-            if proxies:
-                handler = urllib.request.ProxyHandler(proxies)
-                opener = urllib.request.build_opener(handler).open
-            with opener(rq, timeout=20) as resp:
-                return resp.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as exc:
-            if exc.code in (429, 500, 502, 503, 504):
-                last_exc = exc
-                continue
-            raise
-        except urllib.error.URLError as exc:
+            return ctx.fetch(url)
+        except _RetryableError as exc:
             last_exc = exc
             continue
-        except Exception as exc:
-            if ctx.use_curl:
-                last_exc = exc
-                continue
-            raise
     raise RuntimeError(f"Failed after {max_retries} attempts: {url}")
 
 
@@ -461,20 +484,17 @@ def main() -> None:
     # Initialize context
     try:
         import curl_cffi.requests as cffi_requests
-        use_curl = True
     except ImportError:
         cffi_requests = None
-        use_curl = False
 
     ctx = ScrapeContext(
         delay=args.delay,
-        use_curl=use_curl,
         cffi_requests=cffi_requests,
         proxies=proxies,
     )
 
     if proxies:
-        if not use_curl:
+        if not ctx.use_curl:
             print(
                 "WARNING: curl_cffi not installed -- using proxies over urllib,"
                 " which still exposes a non-Chrome TLS fingerprint. Install"
@@ -540,7 +560,7 @@ def main() -> None:
     grand_total = len(seen) + len(todo)
     print(
         f"Phase 2: Scraping {len(todo)} datacenters"
-        f" ({len(seen)} already done, {grand_total} total)\\n",
+        f" ({len(seen)} already done, {grand_total} total)\n",
         file=sys.stderr,
     )
 
@@ -575,7 +595,7 @@ def main() -> None:
                         "no __NEXT_DATA__ (possible bot-check or empty page)"
                     )
                 record = _normalize_dc_record(dc, fallback_url=url)
-                fh.write(json.dumps(record, ensure_ascii=False) + "\\n")
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
                 fh.flush()
                 count += 1
                 consecutive_bot_checks = 0
@@ -614,7 +634,7 @@ def main() -> None:
                     consecutive_bot_checks = 0
 
     print(
-        f"\\nDone: {count} new records written to {out_path}",
+        f"\nDone: {count} new records written to {out_path}",
         file=sys.stderr,
     )
 
