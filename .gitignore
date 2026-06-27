@@ -14,3 +14,6 @@ CLAUDE.md
 scripts/backfill_stage.py
 setup.cfg
 .ruff_cache/
+
+#Ignore vscode AI rules
+.github\instructions\codacy.instructions.md

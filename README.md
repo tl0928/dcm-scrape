@@ -148,7 +148,7 @@ state abbreviation via the US Census Geocoder + Nominatim/OSM.
 | --- | --- |
 | `name` | Data center name |
 | `operator_name` | Owning / operating company |
-| `stage` | Operational stage: `0` = planned, `1` = under construction, `2` = operational |
+| `stage` | Lifecycle stage, verbatim from the site's `dc.stage`. Signed scale: `-3` = canceled, `-2` = uncertain, `-1` = land banked, `0` = planned, `1` = under construction, `2` = operational, `4` = decommissioned (`3` is unused). Negative values are stalled/failed pre-build projects; `4` is a facility that operated and was later shut down. May be `null` for nameless rumored listings. |
 | `archived` | `true` if the listing is archived (closed, sold, or converted), else `false`. Archived listings keep `stage: 2`, so this is the only way to tell them apart (derived from the site's `status` field). |
 | `address` | Street address |
 | `city` | City |
