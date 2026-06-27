@@ -1,6 +1,6 @@
 """Enrich scraped datacenter records with geocoding data.
 
-Tier 1 – US Census Geocoder  → lat/lon + FIPS state/county/tract/block
+Tier 1 – US Census Geocoder  → lat/lon + FIPS state/county/tract
 Tier 2 – Nominatim (OSM)     → ZIP confirmation, display_name, state_abbr, county_name
 
 Writes:
@@ -46,7 +46,7 @@ def _census_geocode(street: str, city: str, state: str, postal: str | None) -> d
     Call the Census Geocoder and return a dict of extracted fields, or None.
 
     Returned keys: latitude, longitude, state_fips, county_fips,
-                   census_tract, census_block, state_name, county_name.
+                   census_tract, state_name, county_name.
     """
     params: dict[str, str] = {
         "street": street,
@@ -77,37 +77,69 @@ def _census_geocode(street: str, city: str, state: str, postal: str | None) -> d
 
     m = matches[0]
     coords = m.get("coordinates", {})
-    geos = (
-        m.get("geographies", {})
-        .get("Census Tracts", [{}])
-    )
+    out = _extract_fips(m.get("geographies", {}))
+    out["latitude"] = coords.get("y")
+    out["longitude"] = coords.get("x")
+    return out
+
+
+def _extract_fips(geographies: dict) -> dict:
+    """Pull state/county/tract FIPS + names out of a Census `geographies` block.
+
+    Shared by the address and coordinates endpoints (both return the same
+    `Census Tracts` / `Counties` / `States` shape).
+    """
+    geos = geographies.get("Census Tracts", [{}])
     geo = geos[0] if geos else {}
-    counties = (
-        m.get("geographies", {})
-         .get("Counties", [{}])
-    )
+    counties = geographies.get("Counties", [{}])
     county = counties[0] if counties else {}
-    states = (
-        m.get("geographies", {})
-         .get("States", [{}])
-    )
+    states = geographies.get("States", [{}])
     st = states[0] if states else {}
 
-    state_fips = geo.get("STATE") or st.get("STATE")
-    county_fips = geo.get("COUNTY") or county.get("COUNTY")
-    tract = geo.get("TRACT")
-    block = geo.get("BLKGRP")  # block group; BLOCK not in tract endpoint
-
     return {
-        "latitude": coords.get("y"),
-        "longitude": coords.get("x"),
-        "state_fips": state_fips,
-        "county_fips": county_fips,
-        "census_tract": tract,
-        "census_block": block,
+        "state_fips": geo.get("STATE") or st.get("STATE"),
+        "county_fips": geo.get("COUNTY") or county.get("COUNTY"),
+        "census_tract": geo.get("TRACT"),
         "state_name": st.get("NAME"),
         "county_name": county.get("NAME"),
     }
+
+
+_CENSUS_COORDS_URL = (
+    "https://geocoding.geo.census.gov/geocoder/geographies/coordinates"
+)
+
+
+def _census_geocode_coords(lat: float, lon: float) -> dict | None:
+    """Reverse-lookup FIPS from coordinates via the Census `coordinates` endpoint.
+
+    Used as a fallback when the address geocoder fails to match but the record
+    already has lat/lon (from the site or Nominatim). Returns the same FIPS keys
+    as `_census_geocode` (minus lat/lon), or None on error / no match.
+    """
+    params = {
+        "x": str(lon),
+        "y": str(lat),
+        "benchmark": "Public_AR_Current",
+        "vintage": "Current_Current",
+        "format": "json",
+    }
+    url = _CENSUS_COORDS_URL + "?" + urllib.parse.urlencode(params)
+    try:
+        rq = urllib.request.Request(url, headers=_CENSUS_HEADERS)
+        with urllib.request.urlopen(rq, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except Exception as exc:
+        print(f"    Census coords error: {exc}", file=sys.stderr)
+        return None
+
+    geographies = data.get("result", {}).get("geographies")
+    if not geographies:
+        return None
+    out = _extract_fips(geographies)
+    if not out.get("state_fips"):
+        return None
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +232,6 @@ def enrich(record: dict, census_delay: float = 1.0) -> dict:
         "state_fips": None,
         "county_fips": None,
         "census_tract": None,
-        "census_block": None,
     }
 
     if census:
@@ -208,7 +239,6 @@ def enrich(record: dict, census_delay: float = 1.0) -> dict:
             "state_fips": census.get("state_fips"),
             "county_fips": census.get("county_fips"),
             "census_tract": census.get("census_tract"),
-            "census_block": census.get("census_block"),
             "county_name": census.get("county_name"),
         })
         # Use Census coordinates if the scraped record has none
@@ -230,6 +260,22 @@ def enrich(record: dict, census_delay: float = 1.0) -> dict:
         if loc.get("latitude") is None:
             loc["latitude"] = nom.get("latitude")
             loc["longitude"] = nom.get("longitude")
+
+    # --- FIPS fallback: address match missed but we have coordinates ---
+    # The Census address geocoder is strict about street strings; when it
+    # misses, reverse-lookup FIPS from the coordinates we already have.
+    loc = record.get("location", {})
+    lat, lon = loc.get("latitude"), loc.get("longitude")
+    if geo.get("state_fips") is None and lat is not None and lon is not None:
+        time.sleep(census_delay)
+        fips = _census_geocode_coords(lat, lon)
+        if fips:
+            geo.update({
+                "state_fips": fips.get("state_fips"),
+                "county_fips": fips.get("county_fips"),
+                "census_tract": fips.get("census_tract"),
+                "county_name": geo.get("county_name") or fips.get("county_name"),
+            })
 
     record["geo"] = geo
     return record
@@ -262,7 +308,6 @@ _CSV_COLUMNS = [
     "fips_state",
     "fips_county",
     "census_tract",
-    "census_block",
     "display_name",
 ]
 
@@ -289,7 +334,6 @@ def _record_to_row(rec: dict) -> dict[str, Any]:
         "fips_state": geo.get("state_fips"),
         "fips_county": geo.get("county_fips"),
         "census_tract": geo.get("census_tract"),
-        "census_block": geo.get("census_block"),
         "display_name": geo.get("display_name"),
     }
 
@@ -356,6 +400,40 @@ def main() -> None:
         if done_urls:
             print(f"Resuming: {len(done_urls)} already geocoded", file=sys.stderr)
 
+    # Backfill FIPS for already-geocoded records that have coordinates but no
+    # FIPS (address-match misses from before the coordinate fallback existed).
+    backfill = [
+        r for r in enriched
+        if isinstance(r.get("geo"), dict)
+        and r["geo"].get("state_fips") is None
+        and (r.get("location") or {}).get("latitude") is not None
+        and (r.get("location") or {}).get("longitude") is not None
+    ]
+    if backfill:
+        print(
+            f"Backfilling FIPS for {len(backfill)} records from coordinates ...",
+            file=sys.stderr,
+        )
+        try:
+            from tqdm import tqdm as _tqdm
+            bf_iter = _tqdm(backfill, desc="fips-backfill", unit="dc")
+        except ImportError:
+            bf_iter = backfill
+        filled = 0
+        for rec in bf_iter:
+            loc = rec["location"]
+            time.sleep(args.census_delay)
+            fips = _census_geocode_coords(loc["latitude"], loc["longitude"])
+            if fips:
+                geo = rec["geo"]
+                geo["state_fips"] = fips.get("state_fips")
+                geo["county_fips"] = fips.get("county_fips")
+                geo["census_tract"] = fips.get("census_tract")
+                if not geo.get("county_name"):
+                    geo["county_name"] = fips.get("county_name")
+                filled += 1
+        print(f"Backfilled FIPS for {filled}/{len(backfill)} records", file=sys.stderr)
+
     failed_urls: list[str] = []
 
     with out_jsonl.open("a", encoding="utf-8") as jfh:
@@ -384,6 +462,12 @@ def main() -> None:
 
             if not _geocoded(enriched_rec):
                 failed_urls.append(detail_url)
+
+    # Canonicalize the JSONL: rewrite the whole file from the in-memory set so
+    # backfilled FIPS are persisted and any duplicate appended lines collapse.
+    with out_jsonl.open("w", encoding="utf-8") as jfh:
+        for rec in enriched:
+            jfh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     # Write CSV (all records, geocoded or not)
     with out_csv.open("w", newline="", encoding="utf-8-sig") as cfh:
