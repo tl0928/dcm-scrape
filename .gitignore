@@ -11,5 +11,5 @@ browser_profiles/
 __pycache__/
 *.pyc
 CLAUDE.md
-backfill_stage.py
+scripts/backfill_stage.py
 setup.cfg
