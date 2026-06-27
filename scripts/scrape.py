@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import random
 import re
 import sys
 import time
@@ -40,6 +41,16 @@ _HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+# curl_cffi gives Chrome's TLS fingerprint, defeating JA3/JA4 bot detection.
+# Falls back to urllib if not installed.
+try:
+    import curl_cffi.requests as _cffi_requests
+    _cffi_session = _cffi_requests.Session(impersonate="chrome120")
+    _USE_CURL = True
+except ImportError:
+    _cffi_session = None
+    _USE_CURL = False
 
 
 # ---------------------------------------------------------------------------
@@ -91,10 +102,21 @@ def _get(
     last_exc: Exception | None = None
     for attempt in range(max_retries):
         pause = delay if attempt == 0 else delay * (2 ** attempt)
+        pause *= random.uniform(0.8, 1.2)  # jitter so timing isn't robotic
         time.sleep(pause)
         if attempt > 0:
             _log(f"  [retry {attempt}] {last_exc} -> {url}", bar)
         try:
+            if _USE_CURL:
+                referer = url.rstrip("/").rsplit("/", 1)[0] + "/"
+                resp = _cffi_session.get(
+                    url, headers={"Referer": referer}, timeout=20
+                )
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    last_exc = f"HTTP {resp.status_code}"
+                    continue
+                resp.raise_for_status()
+                return resp.text
             rq = urllib.request.Request(url, headers=_HEADERS)
             with urllib.request.urlopen(rq, timeout=20) as resp:
                 return resp.read().decode("utf-8", errors="replace")
@@ -106,6 +128,11 @@ def _get(
         except urllib.error.URLError as exc:
             last_exc = exc
             continue
+        except Exception as exc:
+            if _USE_CURL:
+                last_exc = exc
+                continue
+            raise
     raise RuntimeError(f"Failed after {max_retries} attempts: {url}")
 
 
@@ -242,10 +269,13 @@ def scrape_dc(url: str, delay: float, bar: object = None) -> dict:
     if data:
         dc = data.get("props", {}).get("pageProps", {}).get("dc", {}) or {}
 
-    if not dc.get("name"):
+    if not dc:
         raise ValueError(
-            "no dc data in __NEXT_DATA__ (possible bot-check or empty page)"
+            "no __NEXT_DATA__ (possible bot-check or empty page)"
         )
+    if not dc.get("name"):
+        status = dc.get("status") or dc.get("stage") or "no-name"
+        raise ValueError(f"PLANNED:{status}")
 
     link = dc.get("link", "")
     statelink = dc.get("statelink", "")
@@ -263,11 +293,16 @@ def scrape_dc(url: str, delay: float, bar: object = None) -> dict:
     if isinstance(dc.get("companies"), dict):
         operator = dc["companies"].get("name")
 
+    page_props = data.get("props", {}).get("pageProps", {}) if data else {}
+    archived = page_props.get("query", {}).get("rw") == "true"
+
     return {
         "source": {"detail_url": detail_url},
         "identity": {
             "name": dc.get("name"),
             "operator_name": operator,
+            "stage": dc.get("stage"),
+            "archived": archived,
         },
         "address": {
             "country": dc.get("country"),
@@ -324,6 +359,13 @@ def _default_output(
 # Main
 # ---------------------------------------------------------------------------
 
+def _refresh_session() -> None:
+    """Replace the curl_cffi session to clear cookies and connection state."""
+    global _cffi_session
+    if _USE_CURL:
+        _cffi_session = _cffi_requests.Session(impersonate="chrome120")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Scrape data centers from datacentermap.com.",
@@ -344,10 +386,12 @@ def main() -> None:
                         help="City (optional; requires --state)")
     parser.add_argument("--output", default=None, metavar="PATH",
                         help="Override output JSONL file path")
-    parser.add_argument("--delay", type=float, default=1.0,
-                        help="Seconds between requests (default: 1.0)")
+    parser.add_argument("--delay", type=float, default=3.0,
+                        help="Seconds between requests (default: 3.0)")
     parser.add_argument("--sample", type=int, default=0,
                         help="Stop after N records, for testing (0 = all)")
+    parser.add_argument("--rediscover", action="store_true",
+                        help="Re-run URL discovery even if a cache file exists")
     args = parser.parse_args()
 
     # Determine geography
@@ -374,6 +418,8 @@ def main() -> None:
     print(f"\nScope:  {' > '.join(scope_parts)}", file=sys.stderr)
     print(f"Output: {out_path}", file=sys.stderr)
 
+    planned_path = out_path.with_name(out_path.stem + "_planned.txt")
+
     # Load already-scraped URLs (resume support)
     seen: set[str] = set()
     if out_path.exists():
@@ -383,19 +429,39 @@ def main() -> None:
                     seen.add(json.loads(line)["source"]["detail_url"])
                 except Exception:
                     pass
-        if seen:
-            print(f"Resuming: {len(seen)} already scraped", file=sys.stderr)
+    if planned_path.exists():
+        with planned_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    seen.add(line)
+    if seen:
+        print(f"Resuming: {len(seen)} already scraped/skipped", file=sys.stderr)
 
-    print("\nPhase 1: Discovering datacenter URLs ...", file=sys.stderr)
-    all_urls = discover_urls(country, state, city, args.delay)
+    urls_cache = out_path.with_name(out_path.stem + "_urls.txt")
 
-    if not all_urls:
+    if urls_cache.exists() and not args.rediscover:
+        with urls_cache.open(encoding="utf-8") as fh:
+            all_urls = [ln.strip() for ln in fh if ln.strip()]
         print(
-            "\n  No URLs found. Check your spelling -- the scraper uses the"
-            "\n  same slugs as datacentermap.com (e.g. 'New York' -> new-york).",
+            f"\nPhase 1: Loaded {len(all_urls)} cached URLs from {urls_cache}"
+            f"\n  (use --rediscover to re-run discovery)\n",
             file=sys.stderr,
         )
-        sys.exit(1)
+    else:
+        print("\nPhase 1: Discovering datacenter URLs ...", file=sys.stderr)
+        all_urls = discover_urls(country, state, city, args.delay)
+
+        if not all_urls:
+            print(
+                "\n  No URLs found. Check your spelling -- the scraper uses the"
+                "\n  same slugs as datacentermap.com (e.g. 'New York' -> new-york).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        urls_cache.write_text("\n".join(all_urls) + "\n", encoding="utf-8")
+        print(f"  URLs cached to {urls_cache}", file=sys.stderr)
 
     todo = [u for u in all_urls if u not in seen]
     grand_total = len(seen) + len(todo)
@@ -406,9 +472,12 @@ def main() -> None:
     )
 
     count = 0
+    skipped_planned = 0
+    consecutive_bot_checks = 0
     bar = None
     start_time = time.time()
-    with out_path.open("a", encoding="utf-8") as fh:
+    with out_path.open("a", encoding="utf-8") as fh, \
+            planned_path.open("a", encoding="utf-8") as pfh:
         try:
             from tqdm import tqdm  # type: ignore[import]
             bar = tqdm(
@@ -432,6 +501,7 @@ def main() -> None:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
                 fh.flush()
                 count += 1
+                consecutive_bot_checks = 0
                 scraped_total = len(seen) + count
                 elapsed = _fmt_elapsed(time.time() - start_time)
                 if bar is not None:
@@ -447,10 +517,36 @@ def main() -> None:
                         file=sys.stderr,
                     )
             except Exception as exc:
-                _log(f"  ERROR {url}: {exc}", bar)
+                msg = str(exc)
+                if msg.startswith("PLANNED:"):
+                    _log(f"  SKIP (planned) {url}: {msg[8:]}", bar)
+                    pfh.write(url + "\n")
+                    pfh.flush()
+                    skipped_planned += 1
+                    consecutive_bot_checks = 0
+                elif "no __NEXT_DATA__" in msg:
+                    _log(f"  ERROR (bot-check) {url}", bar)
+                    consecutive_bot_checks += 1
+                    if consecutive_bot_checks >= 3:
+                        cooldown = random.uniform(180, 300)
+                        _log(
+                            f"  [{consecutive_bot_checks} consecutive"
+                            f" bot-checks] cooling down {cooldown:.0f}s"
+                            f" then refreshing session ...",
+                            bar,
+                        )
+                        time.sleep(cooldown)
+                        _refresh_session()
+                        consecutive_bot_checks = 0
+                else:
+                    _log(f"  ERROR {url}: {exc}", bar)
+                    consecutive_bot_checks = 0
 
     print(
-        f"\nDone: {count} new records written to {out_path}", file=sys.stderr
+        f"\nDone: {count} new records written to {out_path}"
+        + (f", {skipped_planned} planned/future skipped to {planned_path}"
+           if skipped_planned else ""),
+        file=sys.stderr,
     )
 
 

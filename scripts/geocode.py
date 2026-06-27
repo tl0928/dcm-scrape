@@ -248,6 +248,8 @@ def _geocoded(record: dict) -> bool:
 _CSV_COLUMNS = [
     "name",
     "operator_name",
+    "stage",
+    "archived",
     "address",
     "city",
     "state",
@@ -269,9 +271,12 @@ def _record_to_row(rec: dict) -> dict[str, Any]:
     loc = rec.get("location", {})
     geo = rec.get("geo", {})
     addr = rec.get("address", {})
+    identity = rec.get("identity", {})
     return {
-        "name": rec.get("identity", {}).get("name"),
-        "operator_name": rec.get("identity", {}).get("operator_name"),
+        "name": identity.get("name"),
+        "operator_name": identity.get("operator_name"),
+        "stage": identity.get("stage"),
+        "archived": identity.get("archived"),
         "address": addr.get("address"),
         "city": addr.get("city"),
         "state": addr.get("state"),
