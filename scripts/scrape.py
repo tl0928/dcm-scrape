@@ -30,6 +30,47 @@ from typing import Iterator
 
 BASE_URL = "https://www.datacentermap.com"
 
+
+# ---------------------------------------------------------------------------
+# Context and configuration
+# ---------------------------------------------------------------------------
+
+class ScrapeContext:
+    """Holds session state, proxy pool, and configuration for scraping."""
+
+    def __init__(
+        self,
+        delay: float,
+        use_curl: bool,
+        cffi_requests=None,
+        proxies: list[str] | None = None,
+    ):
+        self.delay = delay
+        self.use_curl = use_curl
+        self._cffi_requests = cffi_requests
+        self._cffi_session = None
+        self.proxies = proxies or []
+
+        if self.use_curl and self._cffi_requests is not None:
+            self._cffi_session = self._cffi_requests.Session(impersonate="chrome120")
+
+    def pick_proxy(self) -> dict | None:
+        """Random proxy from the pool as a curl_cffi/requests-style mapping."""
+        if not self.proxies:
+            return None
+        proxy = random.choice(self.proxies)
+        return {"http": proxy, "https": proxy}
+
+    def refresh_session(self) -> None:
+        """Replace the curl_cffi session to clear cookies and connection state."""
+        if self.use_curl and self._cffi_requests is not None:
+            self._cffi_session = self._cffi_requests.Session(impersonate="chrome120")
+
+
+# ---------------------------------------------------------------------------
+# HTTP utilities
+# ---------------------------------------------------------------------------
+
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -42,26 +83,6 @@ _HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# curl_cffi gives Chrome's TLS fingerprint, defeating JA3/JA4 bot detection.
-# Falls back to urllib if not installed.
-try:
-    import curl_cffi.requests as _cffi_requests
-    _cffi_session = _cffi_requests.Session(impersonate="chrome120")
-    _USE_CURL = True
-except ImportError:
-    _cffi_requests = None
-    _cffi_session = None
-    _USE_CURL = False
-
-# Proxy pool (populated by main() from --proxy / --proxy-file). When non-empty,
-# each request picks one at random so a rotating residential pool spreads the
-# load across many IPs and defeats per-IP rate limiting / reputation throttling.
-_PROXIES: list[str] = []
-
-
-# ---------------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------------
 
 def _normalize_proxy(line: str) -> str | None:
     """Turn a proxy line into a full proxy URL curl_cffi/urllib understands.
@@ -88,29 +109,6 @@ def _normalize_proxy(line: str) -> str | None:
     return line  # let the HTTP client reject anything malformed
 
 
-def _pick_proxy() -> dict | None:
-    """Random proxy from the pool as a curl_cffi/requests-style mapping."""
-    if not _PROXIES:
-        return None
-    proxy = random.choice(_PROXIES)
-    return {"http": proxy, "https": proxy}
-
-
-def _to_slug(name: str) -> str:
-    """Convert a human-readable name to a datacentermap.com URL slug.
-
-    Examples:  'Ohio' -> 'ohio'
-               'New York' -> 'new-york'
-               'Los Angeles' -> 'los-angeles'
-    """
-    return re.sub(r"[^a-z0-9]+", "-", name.lower().strip()).strip("-")
-
-
-def _to_label(slug: str) -> str:
-    """'new-york' -> 'New York'  (for display only)."""
-    return slug.replace("-", " ").title()
-
-
 def _fmt_elapsed(seconds: float) -> str:
     """Format elapsed seconds as '2h 04m 30s', '4m 30s', or '30s'."""
     s = int(seconds)
@@ -133,27 +131,27 @@ def _log(msg: str, bar: object = None) -> None:
 
 def _get(
     url: str,
-    delay: float = 1.0,
-    max_retries: int = 3,
+    ctx: ScrapeContext,
     bar: object = None,
+    max_retries: int = 3,
 ) -> str:
     """Fetch URL with exponential back-off on 429/5xx and network errors."""
     last_exc: Exception | None = None
     for attempt in range(max_retries):
-        pause = delay if attempt == 0 else delay * (2 ** attempt)
+        pause = ctx.delay if attempt == 0 else ctx.delay * (2 ** attempt)
         pause *= random.uniform(0.8, 1.2)  # jitter so timing isn't robotic
         time.sleep(pause)
         if attempt > 0:
             _log(f"  [retry {attempt}] {last_exc} -> {url}", bar)
-        proxies = _pick_proxy()
+        proxies = ctx.pick_proxy()
         try:
-            if _USE_CURL:
-                assert _cffi_session is not None
+            if ctx.use_curl:
+                assert ctx._cffi_session is not None
                 referer = url.rstrip("/").rsplit("/", 1)[0] + "/"
                 kwargs: dict = {"headers": {"Referer": referer}, "timeout": 20}
                 if proxies:
                     kwargs["proxies"] = proxies
-                resp = _cffi_session.get(url, **kwargs)
+                resp = ctx._cffi_session.get(url, **kwargs)
                 if resp.status_code in (429, 500, 502, 503, 504):
                     last_exc = Exception(f"HTTP {resp.status_code}")
                     continue
@@ -175,7 +173,7 @@ def _get(
             last_exc = exc
             continue
         except Exception as exc:
-            if _USE_CURL:
+            if ctx.use_curl:
                 last_exc = exc
                 continue
             raise
@@ -183,6 +181,7 @@ def _get(
 
 
 def _parse_next_data(html: str) -> dict | None:
+    """Extract the __NEXT_DATA__ JSON payload from HTML."""
     idx = html.find("__NEXT_DATA__")
     if idx == -1:
         return None
@@ -194,155 +193,30 @@ def _parse_next_data(html: str) -> dict | None:
         return None
 
 
-# ---------------------------------------------------------------------------
-# URL discovery — scoped to the requested geography
-# ---------------------------------------------------------------------------
-
-def _urls_in_city(
-    country: str, state: str, city: str, delay: float
-) -> list[str]:
-    """All DC detail-page URLs under /{country}/{state}/{city}/."""
-    page_url = f"{BASE_URL}/{country}/{state}/{city}/"
-    try:
-        html = _get(page_url, delay=delay)
-    except Exception as exc:
-        print(f"  skip {country}/{state}/{city}: {exc}", file=sys.stderr)
-        return []
-    slugs = list(dict.fromkeys(
-        re.findall(
-            rf'href="/{country}/{state}/{city}/([A-Za-z0-9_-]+)/"', html
-        )
-    ))
-    return [f"{BASE_URL}/{country}/{state}/{city}/{s}/" for s in slugs]
-
-
-def _urls_in_state(country: str, state: str, delay: float) -> list[str]:
-    """All DC detail-page URLs under /{country}/{state}/ (crawls every city)."""
-    page_url = f"{BASE_URL}/{country}/{state}/"
-    try:
-        html = _get(page_url, delay=delay)
-    except Exception as exc:
-        print(f"  skip {country}/{state}: {exc}", file=sys.stderr)
-        return []
-    cities = list(dict.fromkeys(
-        re.findall(rf'href="/{country}/{state}/([A-Za-z0-9_-]+)/"', html)
-    ))
-    print(
-        f"  {len(cities)} cities found in {_to_label(state)}", file=sys.stderr
-    )
-    all_urls: list[str] = []
-    for city in cities:
-        all_urls.extend(_urls_in_city(country, state, city, delay))
-    return all_urls
-
-
-def _urls_from_sitemap(country: str, delay: float) -> list[str]:
-    """Pull all /{country}/{state}/{city}/{slug}/ URLs from the sitemap."""
-    print("  Checking sitemap ...", file=sys.stderr)
-    try:
-        xml = _get(f"{BASE_URL}/sitemap.xml", delay=delay)
-    except Exception as exc:
-        print(f"  sitemap.xml failed: {exc}", file=sys.stderr)
-        return []
-
-    # Sitemap index? Expand sub-sitemaps first.
-    sub_maps = re.findall(r"<loc>(https?://[^<]+sitemap[^<]*)</loc>", xml)
-    texts = [xml] if not sub_maps else []
-    for sm in sub_maps:
-        try:
-            texts.append(_get(sm, delay=delay))
-        except Exception:
-            pass
-
-    pattern = (
-        rf"https?://(?:www\.)?datacentermap\.com"
-        rf"/{country}/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/"
-    )
-    urls: list[str] = []
-    for text in texts:
-        urls.extend(re.findall(pattern, text))
-    return list(dict.fromkeys(urls))
-
-
-def _urls_from_country_crawl(country: str, delay: float) -> list[str]:
-    """BFS crawl: /{country}/ -> state pages -> city pages -> DC URLs."""
-    print("  Crawling country page ...", file=sys.stderr)
-    try:
-        html = _get(f"{BASE_URL}/{country}/", delay=delay)
-    except Exception as exc:
-        print(f"  country page failed: {exc}", file=sys.stderr)
-        return []
-    states = list(dict.fromkeys(
-        re.findall(rf'href="/{country}/([A-Za-z0-9_-]+)/"', html)
-    ))
-    print(f"  {len(states)} states/regions found", file=sys.stderr)
-    all_urls: list[str] = []
-    for state in states:
-        all_urls.extend(_urls_in_state(country, state, delay))
-    return all_urls
-
-
-def discover_urls(
-    country: str,
-    state: str | None,
-    city: str | None,
-    delay: float,
-) -> list[str]:
-    """Return de-duplicated DC detail-page URLs for the requested geography."""
-    if state and city:
-        return _urls_in_city(country, state, city, delay)
-    if state:
-        return _urls_in_state(country, state, delay)
-    # Full country: sitemap is fastest
-    urls = _urls_from_sitemap(country, delay)
-    if urls:
-        print(f"  Sitemap: {len(urls)} URLs found", file=sys.stderr)
-        return urls
-    print("  Sitemap empty/failed -- falling back to crawl", file=sys.stderr)
-    return _urls_from_country_crawl(country, delay)
-
-
-# ---------------------------------------------------------------------------
-# Page scraping
-# ---------------------------------------------------------------------------
-
-def scrape_dc(url: str, delay: float, bar: object = None) -> dict:
-    """Fetch one datacenter detail page and return a structured record."""
-    html = _get(url, delay=delay, bar=bar)
+def _extract_dc_payload(html: str) -> dict | None:
+    """Extract the dc object from __NEXT_DATA__ JSON payload."""
     data = _parse_next_data(html)
+    if not data:
+        return None
+    return data.get("props", {}).get("pageProps", {}).get("dc") or None
 
-    dc: dict = {}
-    if data:
-        dc = data.get("props", {}).get("pageProps", {}).get("dc", {}) or {}
 
-    if not dc:
-        raise ValueError(
-            "no __NEXT_DATA__ (possible bot-check or empty page)"
-        )
-
-    # Records without a name (rumored/future listings) are still written to the
-    # main output with name=null and whatever fields exist; subset later by
-    # `stage` or by null name. They are no longer split into a separate file.
-
+def _normalize_dc_record(dc: dict, fallback_url: str) -> dict:
+    """Convert raw dc payload into the final JSONL record format."""
     link = dc.get("link", "")
     statelink = dc.get("statelink", "")
     countrylink = dc.get("countrylink", "usa")
     marketlink = dc.get("marketlink", "")
 
     if link and statelink and marketlink:
-        detail_url = (
-            f"{BASE_URL}/{countrylink}/{statelink}/{marketlink}/{link}/"
-        )
+        detail_url = f"{BASE_URL}/{countrylink}/{statelink}/{marketlink}/{link}/"
     else:
-        detail_url = url
+        detail_url = fallback_url
 
-    operator: str | None = None
+    operator = None
     if isinstance(dc.get("companies"), dict):
         operator = dc["companies"].get("name")
 
-    # Archived (closed/sold/converted) listings keep stage: 2 but are marked
-    # with status: 2; active listings use status: 1. (query.rw is "true" on
-    # every page and is NOT an archived signal.)
     archived = dc.get("status") == 2
 
     return {
@@ -365,6 +239,124 @@ def scrape_dc(url: str, delay: float, bar: object = None) -> dict:
             "longitude": dc.get("longitude"),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# URL discovery utilities
+# ---------------------------------------------------------------------------
+
+def _to_slug(name: str) -> str:
+    """Convert a human-readable name to a datacentermap.com URL slug."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower().strip()).strip("-")
+
+
+def _to_label(slug: str) -> str:
+    """'new-york' -> 'New York'  (for display only)."""
+    return slug.replace("-", " ").title()
+
+
+def _urls_in_city(
+    country: str, state: str, city: str, ctx: ScrapeContext
+) -> list[str]:
+    """All DC detail-page URLs under /{country}/{state}/{city}/."""
+    page_url = f"{BASE_URL}/{country}/{state}/{city}/"
+    try:
+        html = _get(page_url, ctx=ctx)
+    except Exception as exc:
+        print(f"  skip {country}/{state}/{city}: {exc}", file=sys.stderr)
+        return []
+    slugs = list(dict.fromkeys(
+        re.findall(
+            rf'href="/{country}/{state}/{city}/([A-Za-z0-9_-]+)/"', html
+        )
+    ))
+    return [f"{BASE_URL}/{country}/{state}/{city}/{s}/" for s in slugs]
+
+
+def _urls_in_state(country: str, state: str, ctx: ScrapeContext) -> list[str]:
+    """All DC detail-page URLs under /{country}/{state}/ (crawls every city)."""
+    page_url = f"{BASE_URL}/{country}/{state}/"
+    try:
+        html = _get(page_url, ctx=ctx)
+    except Exception as exc:
+        print(f"  skip {country}/{state}: {exc}", file=sys.stderr)
+        return []
+    cities = list(dict.fromkeys(
+        re.findall(rf'href="/{country}/{state}/([A-Za-z0-9_-]+)/"', html)
+    ))
+    print(
+        f"  {len(cities)} cities found in {_to_label(state)}", file=sys.stderr
+    )
+    all_urls: list[str] = []
+    for city in cities:
+        all_urls.extend(_urls_in_city(country, state, city, ctx))
+    return all_urls
+
+
+def _urls_from_sitemap(country: str, ctx: ScrapeContext) -> list[str]:
+    """Pull all /{country}/{state}/{city}/{slug}/ URLs from the sitemap."""
+    print("  Checking sitemap ...", file=sys.stderr)
+    try:
+        xml = _get(f"{BASE_URL}/sitemap.xml", ctx=ctx)
+    except Exception as exc:
+        print(f"  sitemap.xml failed: {exc}", file=sys.stderr)
+        return []
+
+    # Sitemap index? Expand sub-sitemaps first.
+    sub_maps = re.findall(r"<loc>(https?://[^<]+sitemap[^<]*)</loc>", xml)
+    texts = [xml] if not sub_maps else []
+    for sm in sub_maps:
+        try:
+            texts.append(_get(sm, ctx=ctx))
+        except Exception:
+            pass
+
+    pattern = (
+        rf"https?://(?:www\.)?datacentermap\.com"
+        rf"/{country}/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/\""
+    )
+    urls: list[str] = []
+    for text in texts:
+        urls.extend(re.findall(pattern, text))
+    return list(dict.fromkeys(urls))
+
+
+def _urls_from_country_crawl(country: str, ctx: ScrapeContext) -> list[str]:
+    """BFS crawl: /{country}/ -> state pages -> city pages -> DC URLs."""
+    print("  Crawling country page ...", file=sys.stderr)
+    try:
+        html = _get(f"{BASE_URL}/{country}/", ctx=ctx)
+    except Exception as exc:
+        print(f"  country page failed: {exc}", file=sys.stderr)
+        return []
+    states = list(dict.fromkeys(
+        re.findall(rf'href="/{country}/([A-Za-z0-9_-]+)/"', html)
+    ))
+    print(f"  {len(states)} states/regions found", file=sys.stderr)
+    all_urls: list[str] = []
+    for state in states:
+        all_urls.extend(_urls_in_state(country, state, ctx))
+    return all_urls
+
+
+def discover_urls(
+    country: str,
+    state: str | None,
+    city: str | None,
+    ctx: ScrapeContext,
+) -> list[str]:
+    """Return de-duplicated DC detail-page URLs for the requested geography."""
+    if state and city:
+        return _urls_in_city(country, state, city, ctx)
+    if state:
+        return _urls_in_state(country, state, ctx)
+    # Full country: sitemap is fastest
+    urls = _urls_from_sitemap(country, ctx)
+    if urls:
+        print(f"  Sitemap: {len(urls)} URLs found", file=sys.stderr)
+        return urls
+    print("  Sitemap empty/failed -- falling back to crawl", file=sys.stderr)
+    return _urls_from_country_crawl(country, ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -405,15 +397,8 @@ def _default_output(
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Main orchestration
 # ---------------------------------------------------------------------------
-
-def _refresh_session() -> None:
-    """Replace the curl_cffi session to clear cookies and connection state."""
-    global _cffi_session
-    if _USE_CURL and _cffi_requests is not None:
-        _cffi_session = _cffi_requests.Session(impersonate="chrome120")
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -449,12 +434,20 @@ def main() -> None:
                              "(Webshare host:port:user:pass format supported)")
     args = parser.parse_args()
 
-    # Build the proxy pool. Requests pick one at random per request, so a
-    # rotating residential list spreads load across many IPs.
+    # Determine geography
+    if args.country or args.state or args.city:
+        country = _to_slug(args.country or "usa")
+        state = _to_slug(args.state) if args.state else None
+        city = _to_slug(args.city) if args.city else None
+    else:
+        country, state, city = _prompt_geography()
+
+    # Build proxy pool
+    proxies: list[str] = []
     for raw in (args.proxy or []):
         p = _normalize_proxy(raw)
         if p:
-            _PROXIES.append(p)
+            proxies.append(p)
     if args.proxy_file:
         pf = pathlib.Path(args.proxy_file)
         if not pf.exists():
@@ -463,24 +456,32 @@ def main() -> None:
         for line in pf.read_text(encoding="utf-8").splitlines():
             p = _normalize_proxy(line)
             if p:
-                _PROXIES.append(p)
-    if _PROXIES:
-        if not _USE_CURL:
+                proxies.append(p)
+
+    # Initialize context
+    try:
+        import curl_cffi.requests as cffi_requests
+        use_curl = True
+    except ImportError:
+        cffi_requests = None
+        use_curl = False
+
+    ctx = ScrapeContext(
+        delay=args.delay,
+        use_curl=use_curl,
+        cffi_requests=cffi_requests,
+        proxies=proxies,
+    )
+
+    if proxies:
+        if not use_curl:
             print(
                 "WARNING: curl_cffi not installed -- using proxies over urllib,"
                 " which still exposes a non-Chrome TLS fingerprint. Install"
                 " curl_cffi (see requirements.txt) for best results.",
                 file=sys.stderr,
             )
-        print(f"Proxy pool: {len(_PROXIES)} proxies loaded", file=sys.stderr)
-
-    # Determine geography
-    if args.country or args.state or args.city:
-        country = _to_slug(args.country or "usa")
-        state = _to_slug(args.state) if args.state else None
-        city = _to_slug(args.city) if args.city else None
-    else:
-        country, state, city = _prompt_geography()
+        print(f"Proxy pool: {len(proxies)} proxies loaded", file=sys.stderr)
 
     out_path = (
         pathlib.Path(args.output)
@@ -522,7 +523,7 @@ def main() -> None:
         )
     else:
         print("\nPhase 1: Discovering datacenter URLs ...", file=sys.stderr)
-        all_urls = discover_urls(country, state, city, args.delay)
+        all_urls = discover_urls(country, state, city, ctx)
 
         if not all_urls:
             print(
@@ -539,7 +540,7 @@ def main() -> None:
     grand_total = len(seen) + len(todo)
     print(
         f"Phase 2: Scraping {len(todo)} datacenters"
-        f" ({len(seen)} already done, {grand_total} total)\n",
+        f" ({len(seen)} already done, {grand_total} total)\\n",
         file=sys.stderr,
     )
 
@@ -567,8 +568,14 @@ def main() -> None:
             if args.sample and count >= args.sample:
                 break
             try:
-                record = scrape_dc(url, args.delay, bar=bar)
-                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                html = _get(url, ctx=ctx, bar=bar)
+                dc = _extract_dc_payload(html)
+                if not dc:
+                    raise ValueError(
+                        "no __NEXT_DATA__ (possible bot-check or empty page)"
+                    )
+                record = _normalize_dc_record(dc, fallback_url=url)
+                fh.write(json.dumps(record, ensure_ascii=False) + "\\n")
                 fh.flush()
                 count += 1
                 consecutive_bot_checks = 0
@@ -600,14 +607,14 @@ def main() -> None:
                             bar,
                         )
                         time.sleep(cooldown)
-                        _refresh_session()
+                        ctx.refresh_session()
                         consecutive_bot_checks = 0
                 else:
                     _log(f"  ERROR {url}: {exc}", bar)
                     consecutive_bot_checks = 0
 
     print(
-        f"\nDone: {count} new records written to {out_path}",
+        f"\\nDone: {count} new records written to {out_path}",
         file=sys.stderr,
     )
 
