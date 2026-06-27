@@ -108,7 +108,7 @@ state abbreviation via the US Census Geocoder + Nominatim/OSM.
 | --- | --- |
 | `output/<scope>.jsonl` | Raw scrape, one record per line, resume-safe |
 | `output/<scope>_geocoded.jsonl` | Enriched with `geo` block |
-| `output/<scope>.csv` | Flat CSV, 16 columns |
+| `output/<scope>.csv` | Flat CSV, 18 columns |
 | `output/failed_geocode.txt` | URLs that couldn't be geocoded |
 
 ## Variables collected
@@ -120,6 +120,7 @@ state abbreviation via the US Census Geocoder + Nominatim/OSM.
 | `name` | Data center name |
 | `operator_name` | Owning / operating company |
 | `stage` | Operational stage: `0` = planned, `1` = under construction, `2` = operational |
+| `archived` | `true` if the listing is archived (closed, sold, or converted), else `false`. Archived listings keep `stage: 2`, so this is the only way to tell them apart (derived from the site's `status` field). |
 | `address` | Street address |
 | `city` | City |
 | `state` | State or region (full name) |
