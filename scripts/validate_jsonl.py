@@ -47,10 +47,12 @@ def validate(records: list[dict[str, Any]]) -> tuple[Counter, list[str]]:
         "name": "identity.name",
         "operator_name": "identity.operator_name",
         "country": "address.country",
+        "state": "address.state",
         "city": "address.city",
+        "address": "address.address",
+        "postal": "address.postal",
         "latitude": "location.latitude",
         "longitude": "location.longitude",
-        "external_website": "links.external_website",
     }
 
     for index, record in enumerate(records, start=1):
@@ -96,10 +98,12 @@ def main() -> None:
         "has_name",
         "has_operator_name",
         "has_country",
+        "has_state",
         "has_city",
+        "has_address",
+        "has_postal",
         "has_latitude",
         "has_longitude",
-        "has_external_website",
         "missing_detail_url",
         "missing_name",
         "duplicate_detail_url",
