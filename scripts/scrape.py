@@ -53,10 +53,48 @@ except ImportError:
     _cffi_session = None
     _USE_CURL = False
 
+# Proxy pool (populated by main() from --proxy / --proxy-file). When non-empty,
+# each request picks one at random so a rotating residential pool spreads the
+# load across many IPs and defeats per-IP rate limiting / reputation throttling.
+_PROXIES: list[str] = []
+
 
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
+
+def _normalize_proxy(line: str) -> str | None:
+    """Turn a proxy line into a full proxy URL curl_cffi/urllib understands.
+
+    Accepts the formats Webshare hands out:
+        host:port:username:password   -> http://username:password@host:port
+        host:port                     -> http://host:port
+        http(s)://...                 -> used as-is
+        socks5://...                  -> used as-is
+    Returns None for blank lines / comments.
+    """
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    if "://" in line:
+        return line
+    parts = line.split(":")
+    if len(parts) == 4:
+        host, port, user, pwd = parts
+        return f"http://{user}:{pwd}@{host}:{port}"
+    if len(parts) == 2:
+        host, port = parts
+        return f"http://{host}:{port}"
+    return line  # let the HTTP client reject anything malformed
+
+
+def _pick_proxy() -> dict | None:
+    """Random proxy from the pool as a curl_cffi/requests-style mapping."""
+    if not _PROXIES:
+        return None
+    proxy = random.choice(_PROXIES)
+    return {"http": proxy, "https": proxy}
+
 
 def _to_slug(name: str) -> str:
     """Convert a human-readable name to a datacentermap.com URL slug.
@@ -107,20 +145,26 @@ def _get(
         time.sleep(pause)
         if attempt > 0:
             _log(f"  [retry {attempt}] {last_exc} -> {url}", bar)
+        proxies = _pick_proxy()
         try:
             if _USE_CURL:
                 assert _cffi_session is not None
                 referer = url.rstrip("/").rsplit("/", 1)[0] + "/"
-                resp = _cffi_session.get(
-                    url, headers={"Referer": referer}, timeout=20
-                )
+                kwargs: dict = {"headers": {"Referer": referer}, "timeout": 20}
+                if proxies:
+                    kwargs["proxies"] = proxies
+                resp = _cffi_session.get(url, **kwargs)
                 if resp.status_code in (429, 500, 502, 503, 504):
                     last_exc = Exception(f"HTTP {resp.status_code}")
                     continue
                 resp.raise_for_status()
                 return resp.text
             rq = urllib.request.Request(url, headers=_HEADERS)
-            with urllib.request.urlopen(rq, timeout=20) as resp:
+            opener = urllib.request.urlopen
+            if proxies:
+                handler = urllib.request.ProxyHandler(proxies)
+                opener = urllib.request.build_opener(handler).open
+            with opener(rq, timeout=20) as resp:
                 return resp.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             if exc.code in (429, 500, 502, 503, 504):
@@ -394,7 +438,38 @@ def main() -> None:
                         help="Stop after N records, for testing (0 = all)")
     parser.add_argument("--rediscover", action="store_true",
                         help="Re-run URL discovery even if a cache file exists")
+    parser.add_argument("--proxy", default=None, metavar="URL", action="append",
+                        help="Proxy URL (host:port[:user:pass] or full URL). "
+                             "Repeatable. Combined with --proxy-file.")
+    parser.add_argument("--proxy-file", default=None, metavar="PATH",
+                        help="File with one proxy per line "
+                             "(Webshare host:port:user:pass format supported)")
     args = parser.parse_args()
+
+    # Build the proxy pool. Requests pick one at random per request, so a
+    # rotating residential list spreads load across many IPs.
+    for raw in (args.proxy or []):
+        p = _normalize_proxy(raw)
+        if p:
+            _PROXIES.append(p)
+    if args.proxy_file:
+        pf = pathlib.Path(args.proxy_file)
+        if not pf.exists():
+            print(f"Proxy file not found: {pf}", file=sys.stderr)
+            sys.exit(1)
+        for line in pf.read_text(encoding="utf-8").splitlines():
+            p = _normalize_proxy(line)
+            if p:
+                _PROXIES.append(p)
+    if _PROXIES:
+        if not _USE_CURL:
+            print(
+                "WARNING: curl_cffi not installed -- using proxies over urllib,"
+                " which still exposes a non-Chrome TLS fingerprint. Install"
+                " curl_cffi (see requirements.txt) for best results.",
+                file=sys.stderr,
+            )
+        print(f"Proxy pool: {len(_PROXIES)} proxies loaded", file=sys.stderr)
 
     # Determine geography
     if args.country or args.state or args.city:

@@ -5,6 +5,8 @@
 *.log
 output/
 raw/
+proxies.txt
+proxies*.txt
 browser_profiles/
 __pycache__/
 *.pyc

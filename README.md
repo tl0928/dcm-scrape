@@ -23,6 +23,68 @@ python scripts/scrape.py --country Germany
 python scripts/scrape.py --state Ohio --sample 10
 ```
 
+## Command-line flags
+
+### `scrape.py`
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--country NAME` | `USA` | Country name or slug. Case-insensitive; spaces become hyphens (`"United Kingdom"` → `united-kingdom`). |
+| `--state NAME` | — | State or region. Scopes discovery to one state (all its cities). |
+| `--city NAME` | — | City. Requires `--state`. Scopes discovery to a single city (fastest). |
+| `--output PATH` | auto | Override the output JSONL path. Default is auto-named from the scope (e.g. `output/usa_ohio.jsonl`). |
+| `--delay SECONDS` | `3.0` | Seconds between requests, with ±20% random jitter. Lower for small scoped runs; raise if hitting bot-checks. |
+| `--sample N` | `0` (all) | Stop after N records. Use for smoke-testing before a full run. |
+| `--rediscover` | off | Re-run Phase 1 URL discovery even if a `_urls.txt` cache exists. |
+| `--proxy URL` | — | A single proxy. Repeatable. Accepts `host:port`, `host:port:user:pass`, or a full `http(s)://` / `socks5://` URL. |
+| `--proxy-file PATH` | — | A file with one proxy per line (Webshare `host:port:user:pass` format supported). Combined with any `--proxy` values. |
+
+Run with **no flags** to be prompted interactively for Country / State / City.
+
+The scraper is **resume-safe**: re-running the same command skips records already in the
+output file, so you can interrupt (`Ctrl-C`) and continue any time.
+
+### `geocode.py` (US only)
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `input` | required | Positional: the raw scrape JSONL to enrich. |
+| `--output-jsonl PATH` | `output/usa_geocoded.jsonl` | Where to write the enriched JSONL (with the `geo` block). |
+| `--output-csv PATH` | `output/usa.csv` | Where to write the final flat CSV. |
+| `--failed PATH` | `output/failed_geocode.txt` | File listing `detail_url`s that couldn't be geocoded. |
+| `--census-delay SECONDS` | `0.5` | Delay between US Census Geocoder requests (Nominatim is fixed at 1 req/s). |
+
+## Using a proxy
+
+The site rate-limits and throttles by IP. Routing requests through a **rotating
+residential proxy pool** spreads them across many IPs, which largely eliminates the
+per-IP throttling. `curl_cffi` still supplies the Chrome TLS fingerprint — proxy and
+impersonation work together.
+
+A proxy is chosen **at random per request**, so a large rotating list (e.g. Webshare
+backbone residential) automatically distributes load.
+
+```bash
+# Single proxy
+python scripts/scrape.py --state Ohio --proxy http://user:pass@host:port
+
+# A proxy list file (one per line) — recommended for rotating pools
+python scripts/scrape.py --state Ohio --proxy-file proxies.txt --delay 1.0
+```
+
+Supported line formats in a `--proxy-file` (blank lines and `#` comments ignored):
+
+```text
+host:port:username:password      # Webshare download format
+host:port
+http://username:password@host:port
+socks5://host:port
+```
+
+With rotation in place you can usually lower `--delay` (try `1.0` or below). Keep proxy
+files out of git — `proxies*.txt` is gitignored, since the credentials are embedded in
+each line.
+
 ## Geocode (US only)
 
 ```bash
