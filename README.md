@@ -53,6 +53,7 @@ See [CLAUDE.md](CLAUDE.md) for full field reference, schema, and CLI options.
 | --- | --- |
 | `name` | Data center name |
 | `operator_name` | Owning / operating company |
+| `stage` | Operational stage: `0` = planned, `1` = under construction, `2` = operational |
 | `address` | Street address |
 | `city` | City |
 | `state` | State or region (full name) |
