@@ -38,6 +38,7 @@ python scripts/scrape.py --state Ohio --sample 10
 | `--rediscover` | off | Re-run Phase 1 URL discovery even if a `_urls.txt` cache exists. |
 | `--proxy URL` | — | A single proxy. Repeatable. Accepts `host:port`, `host:port:user:pass`, or a full `http(s)://` / `socks5://` URL. |
 | `--proxy-file PATH` | — | A file with one proxy per line (Webshare `host:port:user:pass` format supported). Combined with any `--proxy` values. |
+| `--proxy-env [VAR]` | `MY_PROXY` | Read proxy/proxies from an environment variable (default `MY_PROXY`). Separate multiple with newlines, commas, or spaces. Keeps credentials out of the command line and shell history. |
 
 Run with **no flags** to be prompted interactively for Country / State / City.
 
@@ -79,6 +80,34 @@ python scripts/scrape.py --state Ohio --proxy http://user:pass@host:port
 # A proxy list file (one per line) — recommended for rotating pools
 python scripts/scrape.py --state Ohio --proxy-file proxies.txt --delay 1.0
 ```
+
+### From an environment variable
+
+To avoid putting credentials on the command line (where they leak into shell
+history and process listings), store them once in the `MY_PROXY` environment
+variable and pass `--proxy-env`:
+
+```powershell
+# PowerShell — current session
+$env:MY_PROXY = "http://user:pass@host:port"
+# …or persist it for future sessions (Windows user-level)
+setx MY_PROXY "http://user:pass@host:port"
+```
+
+```bash
+# bash / zsh
+export MY_PROXY="http://user:pass@host:port"
+```
+
+```bash
+# then just add the flag — no value needed (reads MY_PROXY by default)
+python scripts/scrape.py --state Ohio --proxy-env --delay 1.0
+```
+
+`MY_PROXY` may hold one proxy or several (separated by newlines, commas, or
+spaces). A single **rotating backbone** endpoint that rotates the exit IP
+server-side counts as one entry, so one value is enough. To read from a
+different variable name, pass it explicitly: `--proxy-env OTHER_VAR`.
 
 Supported line formats in a `--proxy-file` (blank lines and `#` comments ignored):
 

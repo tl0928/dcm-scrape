@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import random
 import re
@@ -455,6 +456,12 @@ def main() -> None:
     parser.add_argument("--proxy-file", default=None, metavar="PATH",
                         help="File with one proxy per line "
                              "(Webshare host:port:user:pass format supported)")
+    parser.add_argument("--proxy-env", nargs="?", const="MY_PROXY",
+                        default=None, metavar="VAR",
+                        help="Read proxy/proxies from an environment variable "
+                             "(default MY_PROXY). Separate multiple proxies with "
+                             "newlines, commas, or spaces. Combined with --proxy "
+                             "and --proxy-file.")
     args = parser.parse_args()
 
     # Determine geography
@@ -478,6 +485,18 @@ def main() -> None:
             sys.exit(1)
         for line in pf.read_text(encoding="utf-8").splitlines():
             p = _normalize_proxy(line)
+            if p:
+                proxies.append(p)
+    if args.proxy_env:
+        raw_env = os.environ.get(args.proxy_env)
+        if not raw_env:
+            print(
+                f"Environment variable {args.proxy_env} is not set or empty.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        for token in re.split(r"[\s,]+", raw_env.strip()):
+            p = _normalize_proxy(token)
             if p:
                 proxies.append(p)
 
