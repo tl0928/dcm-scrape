@@ -70,7 +70,7 @@ def _census_geocode(street: str, city: str, state: str, postal: str | None) -> d
 
     matches = (
         data.get("result", {})
-            .get("addressMatches", [])
+        .get("addressMatches", [])
     )
     if not matches:
         return None
@@ -79,7 +79,7 @@ def _census_geocode(street: str, city: str, state: str, postal: str | None) -> d
     coords = m.get("coordinates", {})
     geos = (
         m.get("geographies", {})
-         .get("Census Tracts", [{}])
+        .get("Census Tracts", [{}])
     )
     geo = geos[0] if geos else {}
     counties = (
@@ -351,19 +351,22 @@ def main() -> None:
         if done_urls:
             print(f"Resuming: {len(done_urls)} already geocoded", file=sys.stderr)
 
-    try:
-        from tqdm import tqdm  # type: ignore[import]
-        _wrap = tqdm
-    except ImportError:
-        _wrap = lambda x, **kw: x  # noqa: E731
-
     failed_urls: list[str] = []
 
     with out_jsonl.open("a", encoding="utf-8") as jfh:
-        todo = [r for r in records if r.get("source", {}).get("detail_url") not in done_urls]
-        print(f"Geocoding {len(todo)} records …", file=sys.stderr)
+        todo = [
+            r for r in records
+            if r.get("source", {}).get("detail_url") not in done_urls
+        ]
+        print(f"Geocoding {len(todo)} records ...", file=sys.stderr)
 
-        for rec in _wrap(todo, desc="geocoding", unit="dc"):
+        try:
+            from tqdm import tqdm  # type: ignore[import]
+            iterable = tqdm(todo, desc="geocoding", unit="dc")
+        except ImportError:
+            iterable = todo
+
+        for rec in iterable:
             detail_url = rec.get("source", {}).get("detail_url", "")
             print(f"  {detail_url}", file=sys.stderr)
 

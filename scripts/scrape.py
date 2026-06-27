@@ -35,7 +35,9 @@ _HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    ),
     "Accept-Language": "en-US,en;q=0.9",
 }
 
@@ -47,15 +49,15 @@ _HEADERS = {
 def _to_slug(name: str) -> str:
     """Convert a human-readable name to a datacentermap.com URL slug.
 
-    Examples:  'Ohio' → 'ohio'
-               'New York' → 'new-york'
-               'Los Angeles' → 'los-angeles'
+    Examples:  'Ohio' -> 'ohio'
+               'New York' -> 'new-york'
+               'Los Angeles' -> 'los-angeles'
     """
     return re.sub(r"[^a-z0-9]+", "-", name.lower().strip()).strip("-")
 
 
 def _to_label(slug: str) -> str:
-    """'new-york' → 'New York'  (for display only)."""
+    """'new-york' -> 'New York'  (for display only)."""
     return slug.replace("-", " ").title()
 
 
@@ -79,14 +81,19 @@ def _log(msg: str, bar: object = None) -> None:
         print(msg, file=sys.stderr)
 
 
-def _get(url: str, delay: float = 1.0, max_retries: int = 3, bar: object = None) -> str:
+def _get(
+    url: str,
+    delay: float = 1.0,
+    max_retries: int = 3,
+    bar: object = None,
+) -> str:
     """Fetch URL with exponential back-off on 429/5xx and network errors."""
     last_exc: Exception | None = None
     for attempt in range(max_retries):
         pause = delay if attempt == 0 else delay * (2 ** attempt)
         time.sleep(pause)
         if attempt > 0:
-            _log(f"  [retry {attempt}] {last_exc} → {url}", bar)
+            _log(f"  [retry {attempt}] {last_exc} -> {url}", bar)
         try:
             rq = urllib.request.Request(url, headers=_HEADERS)
             with urllib.request.urlopen(rq, timeout=20) as resp:
@@ -118,7 +125,9 @@ def _parse_next_data(html: str) -> dict | None:
 # URL discovery — scoped to the requested geography
 # ---------------------------------------------------------------------------
 
-def _urls_in_city(country: str, state: str, city: str, delay: float) -> list[str]:
+def _urls_in_city(
+    country: str, state: str, city: str, delay: float
+) -> list[str]:
     """All DC detail-page URLs under /{country}/{state}/{city}/."""
     page_url = f"{BASE_URL}/{country}/{state}/{city}/"
     try:
@@ -127,7 +136,9 @@ def _urls_in_city(country: str, state: str, city: str, delay: float) -> list[str
         print(f"  skip {country}/{state}/{city}: {exc}", file=sys.stderr)
         return []
     slugs = list(dict.fromkeys(
-        re.findall(rf'href="/{country}/{state}/{city}/([A-Za-z0-9_-]+)/"', html)
+        re.findall(
+            rf'href="/{country}/{state}/{city}/([A-Za-z0-9_-]+)/"', html
+        )
     ))
     return [f"{BASE_URL}/{country}/{state}/{city}/{s}/" for s in slugs]
 
@@ -143,7 +154,9 @@ def _urls_in_state(country: str, state: str, delay: float) -> list[str]:
     cities = list(dict.fromkeys(
         re.findall(rf'href="/{country}/{state}/([A-Za-z0-9_-]+)/"', html)
     ))
-    print(f"  {len(cities)} cities found in {_to_label(state)}", file=sys.stderr)
+    print(
+        f"  {len(cities)} cities found in {_to_label(state)}", file=sys.stderr
+    )
     all_urls: list[str] = []
     for city in cities:
         all_urls.extend(_urls_in_city(country, state, city, delay))
@@ -152,7 +165,7 @@ def _urls_in_state(country: str, state: str, delay: float) -> list[str]:
 
 def _urls_from_sitemap(country: str, delay: float) -> list[str]:
     """Pull all /{country}/{state}/{city}/{slug}/ URLs from the sitemap."""
-    print("  Checking sitemap …", file=sys.stderr)
+    print("  Checking sitemap ...", file=sys.stderr)
     try:
         xml = _get(f"{BASE_URL}/sitemap.xml", delay=delay)
     except Exception as exc:
@@ -179,8 +192,8 @@ def _urls_from_sitemap(country: str, delay: float) -> list[str]:
 
 
 def _urls_from_country_crawl(country: str, delay: float) -> list[str]:
-    """BFS crawl: /{country}/ → state pages → city pages → DC URLs."""
-    print("  Crawling country page …", file=sys.stderr)
+    """BFS crawl: /{country}/ -> state pages -> city pages -> DC URLs."""
+    print("  Crawling country page ...", file=sys.stderr)
     try:
         html = _get(f"{BASE_URL}/{country}/", delay=delay)
     except Exception as exc:
@@ -212,7 +225,7 @@ def discover_urls(
     if urls:
         print(f"  Sitemap: {len(urls)} URLs found", file=sys.stderr)
         return urls
-    print("  Sitemap empty/failed — falling back to crawl", file=sys.stderr)
+    print("  Sitemap empty/failed -- falling back to crawl", file=sys.stderr)
     return _urls_from_country_crawl(country, delay)
 
 
@@ -230,7 +243,9 @@ def scrape_dc(url: str, delay: float, bar: object = None) -> dict:
         dc = data.get("props", {}).get("pageProps", {}).get("dc", {}) or {}
 
     if not dc.get("name"):
-        raise ValueError("no dc data in __NEXT_DATA__ (possible bot-check or empty page)")
+        raise ValueError(
+            "no dc data in __NEXT_DATA__ (possible bot-check or empty page)"
+        )
 
     link = dc.get("link", "")
     statelink = dc.get("statelink", "")
@@ -238,7 +253,9 @@ def scrape_dc(url: str, delay: float, bar: object = None) -> dict:
     marketlink = dc.get("marketlink", "")
 
     if link and statelink and marketlink:
-        detail_url = f"{BASE_URL}/{countrylink}/{statelink}/{marketlink}/{link}/"
+        detail_url = (
+            f"{BASE_URL}/{countrylink}/{statelink}/{marketlink}/{link}/"
+        )
     else:
         detail_url = url
 
@@ -279,12 +296,12 @@ def _prompt_geography() -> tuple[str, str | None, str | None]:
     print()
 
     country_raw = input("Country [USA]: ").strip() or "USA"
-    state_raw   = input("State   [all]: ").strip()
-    city_raw    = input("City    [all]: ").strip() if state_raw else ""
+    state_raw = input("State   [all]: ").strip()
+    city_raw = input("City    [all]: ").strip() if state_raw else ""
 
     country = _to_slug(country_raw)
-    state   = _to_slug(state_raw) if state_raw else None
-    city    = _to_slug(city_raw)  if city_raw  else None
+    state = _to_slug(state_raw) if state_raw else None
+    city = _to_slug(city_raw) if city_raw else None
     return country, state, city
 
 
@@ -292,7 +309,9 @@ def _prompt_geography() -> tuple[str, str | None, str | None]:
 # Output path
 # ---------------------------------------------------------------------------
 
-def _default_output(country: str, state: str | None, city: str | None) -> pathlib.Path:
+def _default_output(
+    country: str, state: str | None, city: str | None
+) -> pathlib.Path:
     parts = [country]
     if state:
         parts.append(state)
@@ -319,27 +338,31 @@ def main() -> None:
     )
     parser.add_argument("--country", default=None, metavar="NAME",
                         help="Country name or slug (default: USA)")
-    parser.add_argument("--state",   default=None, metavar="NAME",
+    parser.add_argument("--state", default=None, metavar="NAME",
                         help="State or region (optional)")
-    parser.add_argument("--city",    default=None, metavar="NAME",
+    parser.add_argument("--city", default=None, metavar="NAME",
                         help="City (optional; requires --state)")
-    parser.add_argument("--output",  default=None, metavar="PATH",
+    parser.add_argument("--output", default=None, metavar="PATH",
                         help="Override output JSONL file path")
-    parser.add_argument("--delay",   type=float, default=1.0,
+    parser.add_argument("--delay", type=float, default=1.0,
                         help="Seconds between requests (default: 1.0)")
-    parser.add_argument("--sample",  type=int, default=0,
+    parser.add_argument("--sample", type=int, default=0,
                         help="Stop after N records, for testing (0 = all)")
     args = parser.parse_args()
 
     # Determine geography
     if args.country or args.state or args.city:
         country = _to_slug(args.country or "usa")
-        state   = _to_slug(args.state) if args.state else None
-        city    = _to_slug(args.city)  if args.city  else None
+        state = _to_slug(args.state) if args.state else None
+        city = _to_slug(args.city) if args.city else None
     else:
         country, state, city = _prompt_geography()
 
-    out_path = pathlib.Path(args.output) if args.output else _default_output(country, state, city)
+    out_path = (
+        pathlib.Path(args.output)
+        if args.output
+        else _default_output(country, state, city)
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Print scope summary
@@ -348,7 +371,7 @@ def main() -> None:
         scope_parts.append(_to_label(state))
     if city:
         scope_parts.append(_to_label(city))
-    print(f"\nScope:  {' › '.join(scope_parts)}", file=sys.stderr)
+    print(f"\nScope:  {' > '.join(scope_parts)}", file=sys.stderr)
     print(f"Output: {out_path}", file=sys.stderr)
 
     # Load already-scraped URLs (resume support)
@@ -363,13 +386,13 @@ def main() -> None:
         if seen:
             print(f"Resuming: {len(seen)} already scraped", file=sys.stderr)
 
-    print("\nPhase 1: Discovering datacenter URLs …", file=sys.stderr)
+    print("\nPhase 1: Discovering datacenter URLs ...", file=sys.stderr)
     all_urls = discover_urls(country, state, city, args.delay)
 
     if not all_urls:
         print(
-            "\n  No URLs found. Check your spelling — the scraper uses the same"
-            "\n  slugs as datacentermap.com (e.g. 'New York' → new-york).",
+            "\n  No URLs found. Check your spelling -- the scraper uses the"
+            "\n  same slugs as datacentermap.com (e.g. 'New York' -> new-york).",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -412,15 +435,23 @@ def main() -> None:
                 scraped_total = len(seen) + count
                 elapsed = _fmt_elapsed(time.time() - start_time)
                 if bar is not None:
-                    bar.set_description(f"Scraped {scraped_total}/{grand_total}")
+                    bar.set_description(
+                        f"Scraped {scraped_total}/{grand_total}"
+                    )
                     bar.set_postfix(elapsed=elapsed)
                 elif count % 50 == 0 or count == len(todo):
                     pct = scraped_total / grand_total * 100
-                    print(f"  [{scraped_total}/{grand_total}] {pct:.1f}% | {elapsed}", file=sys.stderr)
+                    print(
+                        f"  [{scraped_total}/{grand_total}]"
+                        f" {pct:.1f}% | {elapsed}",
+                        file=sys.stderr,
+                    )
             except Exception as exc:
                 _log(f"  ERROR {url}: {exc}", bar)
 
-    print(f"\nDone: {count} new records written to {out_path}", file=sys.stderr)
+    print(
+        f"\nDone: {count} new records written to {out_path}", file=sys.stderr
+    )
 
 
 if __name__ == "__main__":
