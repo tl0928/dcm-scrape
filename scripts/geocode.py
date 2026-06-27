@@ -331,9 +331,9 @@ def _record_to_row(rec: dict) -> dict[str, Any]:
         "detail_url": rec.get("source", {}).get("detail_url"),
         "latitude": loc.get("latitude"),
         "longitude": loc.get("longitude"),
-        "fips_state": geo.get("state_fips"),
-        "fips_county": geo.get("county_fips"),
-        "census_tract": geo.get("census_tract"),
+        "fips_state": str(geo["state_fips"]) if geo.get("state_fips") is not None else None,
+        "fips_county": str(geo["county_fips"]) if geo.get("county_fips") is not None else None,
+        "census_tract": str(geo["census_tract"]) if geo.get("census_tract") is not None else None,
         "display_name": geo.get("display_name"),
     }
 
