@@ -137,7 +137,7 @@ state abbreviation via the US Census Geocoder + Nominatim/OSM.
 | --- | --- |
 | `output/<scope>.jsonl` | Raw scrape, one record per line, resume-safe |
 | `output/<scope>_geocoded.jsonl` | Enriched with `geo` block |
-| `output/<scope>.csv` | Flat CSV, 18 columns |
+| `output/<scope>.csv` | Flat CSV, 17 columns |
 | `output/failed_geocode.txt` | URLs that couldn't be geocoded |
 
 ## Variables collected
@@ -169,7 +169,6 @@ state abbreviation via the US Census Geocoder + Nominatim/OSM.
 | `fips_state` | Census | 2-digit state FIPS code (e.g. `39`) |
 | `fips_county` | Census | 3-digit county FIPS code (e.g. `035`) |
 | `census_tract` | Census | 6-digit census tract (e.g. `502100`) |
-| `census_block` | Census | Block group number |
 
 Lat/lon from the scraper are kept as-is; geocoders only fill them in when the site left them blank.
 
