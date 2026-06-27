@@ -371,9 +371,11 @@ def main() -> None:
         except ImportError:
             iterable = todo
 
-        for rec in iterable:
+        grand_total = len(records)
+        for i, rec in enumerate(iterable, start=1):
             detail_url = rec.get("source", {}).get("detail_url", "")
-            print(f"  {detail_url}", file=sys.stderr)
+            geocoded_total = len(done_urls) + i
+            print(f"  [{geocoded_total}/{grand_total}] {detail_url}", file=sys.stderr)
 
             enriched_rec = enrich(rec, census_delay=args.census_delay)
             jfh.write(json.dumps(enriched_rec, ensure_ascii=False) + "\n")
