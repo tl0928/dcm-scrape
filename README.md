@@ -56,6 +56,14 @@ output file, so you can interrupt (`Ctrl-C`) and continue any time.
 
 ## Using a proxy
 
+**When you need one.** Small scopes don't need a proxy — a single city, a single
+state, or a country with relatively few data centers is a small enough batch to
+finish on one IP before the site throttles you. A proxy mainly helps on **large
+geographies** like the USA (thousands of listings): scraping that many pages from
+one IP gets progressively throttled, so without a proxy you'd have to spread the
+run over several days to let the IP cool down. A rotating proxy pool spreads the
+requests across many IPs, letting you collect the whole dataset in one go.
+
 The site rate-limits and throttles by IP. Routing requests through a **rotating
 residential proxy pool** spreads them across many IPs, which largely eliminates the
 per-IP throttling. `curl_cffi` still supplies the Chrome TLS fingerprint — proxy and
@@ -81,9 +89,7 @@ http://username:password@host:port
 socks5://host:port
 ```
 
-With rotation in place you can usually lower `--delay` (try `1.0` or below). Keep proxy
-files out of git — `proxies*.txt` is gitignored, since the credentials are embedded in
-each line.
+With rotation in place you can usually lower `--delay` (try `1.0` or below).
 
 ## Geocode (US only)
 
@@ -104,8 +110,6 @@ state abbreviation via the US Census Geocoder + Nominatim/OSM.
 | `output/<scope>_geocoded.jsonl` | Enriched with `geo` block |
 | `output/<scope>.csv` | Flat CSV, 16 columns |
 | `output/failed_geocode.txt` | URLs that couldn't be geocoded |
-
-See [CLAUDE.md](CLAUDE.md) for full field reference, schema, and CLI options.
 
 ## Variables collected
 
