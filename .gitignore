@@ -13,3 +13,4 @@ __pycache__/
 CLAUDE.md
 scripts/backfill_stage.py
 setup.cfg
+.ruff_cache/
