@@ -37,7 +37,7 @@ python scripts/scrape.py --state Ohio --sample 10
 | `--sample N` | `0` (all) | Stop after N records. Use for smoke-testing before a full run. |
 | `--rediscover` | off | Re-run Phase 1 URL discovery even if a `_urls.txt` cache exists. |
 | `--proxy URL` | — | A single proxy. Repeatable. Accepts `host:port`, `host:port:user:pass`, or a full `http(s)://` / `socks5://` URL. |
-| `--proxy-file PATH` | — | A file with one proxy per line (Webshare `host:port:user:pass` format supported). Combined with any `--proxy` values. |
+| `--proxy-file PATH` | — | A file with one proxy per line. |
 | `--proxy-env [VAR]` | `MY_PROXY` | Read proxy/proxies from an environment variable (default `MY_PROXY`). Separate multiple with newlines, commas, or spaces. Keeps credentials out of the command line and shell history. |
 
 Run with **no flags** to be prompted interactively for Country / State / City.
@@ -70,8 +70,7 @@ residential proxy pool** spreads them across many IPs, which largely eliminates 
 per-IP throttling. `curl_cffi` still supplies the Chrome TLS fingerprint — proxy and
 impersonation work together.
 
-A proxy is chosen **at random per request**, so a large rotating list (e.g. Webshare
-backbone residential) automatically distributes load.
+A proxy is chosen **at random per request**, so a large rotating list automatically distributes load.
 
 ```bash
 # Single proxy
@@ -112,7 +111,7 @@ different variable name, pass it explicitly: `--proxy-env OTHER_VAR`.
 Supported line formats in a `--proxy-file` (blank lines and `#` comments ignored):
 
 ```text
-host:port:username:password      # Webshare download format
+host:port:username:password      
 host:port
 http://username:password@host:port
 socks5://host:port

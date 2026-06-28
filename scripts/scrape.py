@@ -140,7 +140,7 @@ _HEADERS = {
 def _normalize_proxy(line: str) -> str | None:
     """Turn a proxy line into a full proxy URL curl_cffi/urllib understands.
 
-    Accepts the formats Webshare hands out:
+    Common proxy list formats:
         host:port:username:password   -> http://username:password@host:port
         host:port                     -> http://host:port
         http(s)://...                 -> used as-is
@@ -455,7 +455,7 @@ def main() -> None:
                              "Repeatable. Combined with --proxy-file.")
     parser.add_argument("--proxy-file", default=None, metavar="PATH",
                         help="File with one proxy per line "
-                             "(Webshare host:port:user:pass format supported)")
+                             "(host:port:user:pass format)")
     parser.add_argument("--proxy-env", nargs="?", const="MY_PROXY",
                         default=None, metavar="VAR",
                         help="Read proxy/proxies from an environment variable "
